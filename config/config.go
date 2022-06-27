@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"github.com/contentsquare/chproxy/internal"
+	"github.com/nacos-group/nacos-sdk-go/vo"
 	"io/ioutil"
 	"time"
 
@@ -58,6 +60,8 @@ type Config struct {
 	XXX map[string]interface{} `yaml:",inline"`
 
 	networkReg map[string]Networks
+
+	NacosConfig internal.NacosConfig `yaml:"nacos_config"`
 }
 
 // String implements the Stringer interface
@@ -773,7 +777,98 @@ func LoadFile(filename string) (*Config, error) {
 	}
 	cfg := &Config{}
 	if err := yaml.Unmarshal([]byte(content), cfg); err != nil {
+		fmt.Printf("解析config 出现问题：%s\n", err)
 		return nil, err
+	}
+	// 如果配置Nacos的信息后，则直接用Nacos的配置信息
+	if cfg.NacosConfig.ServerIP != "" {
+		cc := cfg.NacosConfig.InitNacosConf()
+
+		//get config
+		content, err := cc.GetConfig(vo.ConfigParam{
+			DataId: cfg.NacosConfig.DataId,
+			Group:  cfg.NacosConfig.Group,
+		})
+		if err != nil {
+			fmt.Printf("或者值出现问题%s\n", err)
+		}
+		if err := yaml.Unmarshal([]byte(content), cfg); err != nil {
+			fmt.Printf("yaml convert is error :%s \n", cfg)
+		}
+		cfg.NacosConfig.ConfigClient = cc
+		fmt.Printf("nacos config value is :%s\n", cfg)
+	}
+	cfg.networkReg = make(map[string]Networks, len(cfg.NetworkGroups))
+	for _, ng := range cfg.NetworkGroups {
+		if _, ok := cfg.networkReg[ng.Name]; ok {
+			return nil, fmt.Errorf("duplicate `network_groups.name` %q", ng.Name)
+		}
+		cfg.networkReg[ng.Name] = ng.Networks
+	}
+	if cfg.Server.HTTP.AllowedNetworks, err = cfg.groupToNetwork(cfg.Server.HTTP.NetworksOrGroups); err != nil {
+		return nil, err
+	}
+	if cfg.Server.HTTPS.AllowedNetworks, err = cfg.groupToNetwork(cfg.Server.HTTPS.NetworksOrGroups); err != nil {
+		return nil, err
+	}
+	if cfg.Server.Metrics.AllowedNetworks, err = cfg.groupToNetwork(cfg.Server.Metrics.NetworksOrGroups); err != nil {
+		return nil, err
+	}
+	var maxResponseTime time.Duration
+	for i := range cfg.Clusters {
+		c := &cfg.Clusters[i]
+		for j := range c.ClusterUsers {
+			u := &c.ClusterUsers[j]
+			cud := time.Duration(u.MaxExecutionTime + u.MaxQueueTime)
+			if cud > maxResponseTime {
+				maxResponseTime = cud
+			}
+			if u.AllowedNetworks, err = cfg.groupToNetwork(u.NetworksOrGroups); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for i := range cfg.Users {
+		u := &cfg.Users[i]
+		if u.MaxExecutionTime == 0 {
+			u.MaxExecutionTime = defaultExecutionTime
+		}
+
+		ud := time.Duration(u.MaxExecutionTime + u.MaxQueueTime)
+		if ud > maxResponseTime {
+			maxResponseTime = ud
+		}
+		if u.AllowedNetworks, err = cfg.groupToNetwork(u.NetworksOrGroups); err != nil {
+			return nil, err
+		}
+	}
+
+	if maxResponseTime < 0 {
+		maxResponseTime = 0
+	}
+	// Give an additional minute for the maximum response time,
+	// so the response body may be sent to the requester.
+	maxResponseTime += time.Minute
+	if len(cfg.Server.HTTP.ListenAddr) > 0 && cfg.Server.HTTP.WriteTimeout == 0 {
+		cfg.Server.HTTP.WriteTimeout = Duration(maxResponseTime)
+	}
+
+	if len(cfg.Server.HTTPS.ListenAddr) > 0 && cfg.Server.HTTPS.WriteTimeout == 0 {
+		cfg.Server.HTTPS.WriteTimeout = Duration(maxResponseTime)
+	}
+
+	if err := cfg.checkVulnerabilities(); err != nil {
+		return nil, fmt.Errorf("security breach: %w\nSet option `hack_me_please=true` to disable security errors", err)
+	}
+	return cfg, nil
+}
+
+// ReloadConfFile loads and validates configuration from provided .yml file
+func ReloadConfFile(configContent string) (*Config, error) {
+	var err error
+	cfg := &Config{}
+	if err := yaml.Unmarshal([]byte(configContent), cfg); err != nil {
+		fmt.Printf("yaml convert is error :%s \n", cfg)
 	}
 	cfg.networkReg = make(map[string]Networks, len(cfg.NetworkGroups))
 	for _, ng := range cfg.NetworkGroups {

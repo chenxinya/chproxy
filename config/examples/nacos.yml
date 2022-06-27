@@ -1,0 +1,6 @@
+nacos_config:
+  server_ip: "192.168.167.88"
+  server_port: 8848
+  client_namespace_id: "bd1424e0-5b99-4170-85fb-24db3a7dc8f5"
+  data_id: dev_chproxy
+  group : chproxy_GROUP

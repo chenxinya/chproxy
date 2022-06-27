@@ -5,13 +5,12 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"github.com/nacos-group/nacos-sdk-go/vo"
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/contentsquare/chproxy/config"
@@ -56,20 +55,26 @@ func main() {
 
 	registerMetrics()
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, syscall.SIGHUP)
-	go func() {
-		for {
-			if <-c == syscall.SIGHUP {
-				log.Infof("SIGHUP received. Going to reload config %s ...", *configFile)
-				if err := reloadConfig(); err != nil {
+	// 动态监听nacos的配置
+	//Listen config change,key=dataId+group+namespaceId.
+	go func(cfg *config.Config) {
+		log.Infof("Start listen nacos config change")
+		err = cfg.NacosConfig.ConfigClient.ListenConfig(vo.ConfigParam{
+			DataId: cfg.NacosConfig.DataId,
+			Group:  cfg.NacosConfig.Group,
+			OnChange: func(namespace, group, dataId, data string) {
+				log.Infof("config changed group:" + group + ", dataId:" + dataId + ", content:" + data)
+				if err := reloadConfig(data); err != nil {
 					log.Errorf("error while reloading config: %s", err)
-					continue
 				}
 				log.Infof("Reloading config %s: successful", *configFile)
-			}
+			},
+		})
+		if err != nil {
+			fmt.Printf("listen config have error：%s\n", err)
 		}
-	}()
+		select {}
+	}(cfg)
 
 	server := cfg.Server
 	if len(server.HTTP.ListenAddr) == 0 && len(server.HTTPS.ListenAddr) == 0 {
@@ -282,8 +287,8 @@ func applyConfig(cfg *config.Config) error {
 	return nil
 }
 
-func reloadConfig() error {
-	cfg, err := loadConfig()
+func reloadConfig(configContent string) error {
+	cfg, err := config.ReloadConfFile(configContent)
 	if err != nil {
 		return err
 	}
